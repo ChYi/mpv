@@ -487,11 +487,13 @@ static int video_output_image(struct MPContext *mpctx, bool *logical_eof)
     }
 
     if (have_new_frame(mpctx, false)) {
-        MP_WARN(mpctx, "NO NEW FRAME. Possible no data");
+        MP_TRACE(mpctx, "NO NEW FRAME. Possible no data\n");
+	MP_TRACE(mpctx, "no_new_frame_count=%d\n", no_new_frame_count);
 	no_new_frame_count ++;
         return VD_NEW_FRAME;
     }
 
+    MP_TRACE(mpctx, "no_new_frame_count=%d\n", no_new_frame_count);
     no_new_frame_count = 0;
 
     // Get a new frame if we need one.
@@ -501,10 +503,12 @@ static int video_output_image(struct MPContext *mpctx, bool *logical_eof)
         struct mp_image *img = NULL;
         struct mp_frame frame = mp_pin_out_read(vo_c->filter->f->pins[1]);
         if (frame.type == MP_FRAME_NONE) {
+            MP_TRACE(mpctx, "MP_FRAME_NONE\n");	    
             r = vo_c->filter->got_output_eof ? VD_EOF : VD_WAIT;
         } else if (frame.type == MP_FRAME_EOF) {
             r = VD_EOF;
         } else if (frame.type == MP_FRAME_VIDEO) {
+	    MP_TRACE(mpctx, "MP_FRAME_VIDEO\n");
             img = frame.data;
         } else {
             MP_ERR(mpctx, "unexpected frame type %s\n",
@@ -514,6 +518,7 @@ static int video_output_image(struct MPContext *mpctx, bool *logical_eof)
         }
         if (img) {
             double endpts = get_play_end_pts(mpctx);
+	    MP_TRACE(mpctx, "endpts=%f\n", endpts);
             if (endpts != MP_NOPTS_VALUE)
                 endpts *= mpctx->play_dir;
             if ((endpts != MP_NOPTS_VALUE && img->pts >= endpts) ||
