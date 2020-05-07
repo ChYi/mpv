@@ -62,6 +62,8 @@ static const char av_desync_help_text[] =
 "position will not match to the video (see A-V status field).\n"
 "\n";
 
+static int no_new_frame_count = 0;
+
 static bool recreate_video_filters(struct MPContext *mpctx)
 {
     struct MPOpts *opts = mpctx->opts;
@@ -484,8 +486,13 @@ static int video_output_image(struct MPContext *mpctx, bool *logical_eof)
         hrseek = false;
     }
 
-    if (have_new_frame(mpctx, false))
+    if (have_new_frame(mpctx, false)) {
+        MP_WARN(mpctx, "NO NEW FRAME. Possible no data");
+	no_new_frame_count ++;
         return VD_NEW_FRAME;
+    }
+
+    no_new_frame_count = 0;
 
     // Get a new frame if we need one.
     int r = VD_PROGRESS;
