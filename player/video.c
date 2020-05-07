@@ -488,13 +488,8 @@ static int video_output_image(struct MPContext *mpctx, bool *logical_eof)
 
     if (have_new_frame(mpctx, false)) {
         MP_TRACE(mpctx, "NO NEW FRAME. Possible no data\n");
-	MP_TRACE(mpctx, "no_new_frame_count=%d\n", no_new_frame_count);
-	no_new_frame_count ++;
         return VD_NEW_FRAME;
     }
-
-    MP_TRACE(mpctx, "no_new_frame_count=%d\n", no_new_frame_count);
-    no_new_frame_count = 0;
 
     // Get a new frame if we need one.
     int r = VD_PROGRESS;
@@ -503,14 +498,23 @@ static int video_output_image(struct MPContext *mpctx, bool *logical_eof)
         struct mp_image *img = NULL;
         struct mp_frame frame = mp_pin_out_read(vo_c->filter->f->pins[1]);
         if (frame.type == MP_FRAME_NONE) {
-            MP_TRACE(mpctx, "MP_FRAME_NONE\n");	    
-            r = vo_c->filter->got_output_eof ? VD_EOF : VD_WAIT;
-        } else if (frame.type == MP_FRAME_EOF) {
+            MP_TRACE(mpctx, "MP_FRAME_NONE\n");
+	    if (no_new_frame_count < 10) {
+		no_new_frame_count ++;
+                r = vo_c->filter->got_output_eof ? VD_EOF : VD_WAIT;
+	    } else {
+		no_new_frame_count = 0;
+                r = VD_EOF;
+	    }
+	} else if (frame.type == MP_FRAME_EOF) {
+	    no_new_frame_count = 0;
             r = VD_EOF;
         } else if (frame.type == MP_FRAME_VIDEO) {
+	    no_new_frame_count = 0;
 	    MP_TRACE(mpctx, "MP_FRAME_VIDEO\n");
             img = frame.data;
         } else {
+	    no_new_frame_count = 0;
             MP_ERR(mpctx, "unexpected frame type %s\n",
                    mp_frame_type_str(frame.type));
             mp_frame_unref(&frame);
@@ -1033,10 +1037,12 @@ void write_video(struct MPContext *mpctx)
     int r = video_output_image(mpctx, &logical_eof);
     MP_TRACE(mpctx, "video_output_image: r=%d/eof=%d/st=%s\n", r, logical_eof,
              mp_status_str(mpctx->video_status));
+    MP_TRACE(mpctx, "no_new_frame_count = %d", no_new_frame_count); 
 
     if (r < 0)
         goto error;
 
+    // if wait too many time without new frame. assume EOF and stop program
     if (r == VD_WAIT) {
         // Heuristic to detect underruns.
         if (mpctx->video_status == STATUS_PLAYING && !vo_still_displaying(vo) &&
@@ -1048,6 +1054,9 @@ void write_video(struct MPContext *mpctx)
         // Demuxer will wake us up for more packets to decode.
         return;
     }
+
+    //either EOF of has new frame, both set no_new_frame_count=0
+    no_new_frame_count = 0;
 
     if (r == VD_EOF) {
         if (check_for_hwdec_fallback(mpctx))
