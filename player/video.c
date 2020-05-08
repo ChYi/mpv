@@ -1055,9 +1055,6 @@ void write_video(struct MPContext *mpctx)
         return;
     }
 
-    //either EOF of has new frame, both set no_new_frame_count=0
-    no_new_frame_count = 0;
-
     if (r == VD_EOF) {
         if (check_for_hwdec_fallback(mpctx))
             return;

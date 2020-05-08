@@ -174,12 +174,18 @@ static void kill_demuxers_reentrant(struct MPContext *mpctx,
                 goto repeat;
             } else if (wait < 0) {
                 demux_free_async_force(item);
-                if (!force)
+                if (!force) {
                     MP_VERBOSE(mpctx, "Forcefully terminating demuxers...\n");
-                force = true;
+                    force = true;
+		} else {
+                    break; //not good method. But we just want to exit the program no matter how
+		}
             }
         }
 
+	if (force) {
+	    break;
+	}
         if (wait >= 0)
             mp_set_timeout(mpctx, wait);
         mp_idle(mpctx);
