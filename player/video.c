@@ -63,6 +63,7 @@ static const char av_desync_help_text[] =
 "\n";
 
 static int no_new_frame_count = 0;
+const int NO_NEW_FRAME_UPPER_LIMIT = 6; //wait 6 frames before decide it lost of input
 
 static bool recreate_video_filters(struct MPContext *mpctx)
 {
@@ -487,7 +488,7 @@ static int video_output_image(struct MPContext *mpctx, bool *logical_eof)
     }
 
     if (have_new_frame(mpctx, false)) {
-        MP_TRACE(mpctx, "NO NEW FRAME. Possible no data\n");
+        //MP_TRACE(mpctx, "NO NEW FRAME. Possible no data\n");
         return VD_NEW_FRAME;
     }
 
@@ -498,8 +499,8 @@ static int video_output_image(struct MPContext *mpctx, bool *logical_eof)
         struct mp_image *img = NULL;
         struct mp_frame frame = mp_pin_out_read(vo_c->filter->f->pins[1]);
         if (frame.type == MP_FRAME_NONE) {
-            MP_TRACE(mpctx, "MP_FRAME_NONE\n");
-	    if (no_new_frame_count < 10) {
+            //MP_TRACE(mpctx, "MP_FRAME_NONE\n");
+	    if (no_new_frame_count < NO_NEW_FRAME_UPPER_LIMIT) {
 		no_new_frame_count ++;
                 r = vo_c->filter->got_output_eof ? VD_EOF : VD_WAIT;
 	    } else {
@@ -511,7 +512,7 @@ static int video_output_image(struct MPContext *mpctx, bool *logical_eof)
             r = VD_EOF;
         } else if (frame.type == MP_FRAME_VIDEO) {
 	    no_new_frame_count = 0;
-	    MP_TRACE(mpctx, "MP_FRAME_VIDEO\n");
+	    //MP_TRACE(mpctx, "MP_FRAME_VIDEO\n");
             img = frame.data;
         } else {
 	    no_new_frame_count = 0;
@@ -522,7 +523,7 @@ static int video_output_image(struct MPContext *mpctx, bool *logical_eof)
         }
         if (img) {
             double endpts = get_play_end_pts(mpctx);
-	    MP_TRACE(mpctx, "endpts=%f\n", endpts);
+	    //MP_TRACE(mpctx, "endpts=%f\n", endpts);
             if (endpts != MP_NOPTS_VALUE)
                 endpts *= mpctx->play_dir;
             if ((endpts != MP_NOPTS_VALUE && img->pts >= endpts) ||
@@ -1037,7 +1038,7 @@ void write_video(struct MPContext *mpctx)
     int r = video_output_image(mpctx, &logical_eof);
     MP_TRACE(mpctx, "video_output_image: r=%d/eof=%d/st=%s\n", r, logical_eof,
              mp_status_str(mpctx->video_status));
-    MP_TRACE(mpctx, "no_new_frame_count = %d", no_new_frame_count); 
+    MP_TRACE(mpctx, "no_new_frame_count = %di\n", no_new_frame_count); 
 
     if (r < 0)
         goto error;
