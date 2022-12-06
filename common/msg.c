@@ -86,6 +86,7 @@ struct mp_log {
     struct mp_log_root *root;
     const char *prefix;
     const char *verbose_prefix;
+    int max_level;              // minimum log level for this instance
     int level;                  // minimum log level for any outputs
     int terminal_level;         // minimum log level for terminal output
     atomic_ulong reload_counter;
@@ -126,7 +127,7 @@ static void update_loglevel(struct mp_log *log)
     pthread_mutex_lock(&root->lock);
     log->level = MSGL_STATUS + root->verbose; // default log level
     if (root->really_quiet)
-        log->level -= 10;
+        log->level = -1;
     for (int n = 0; root->msg_levels && root->msg_levels[n * 2 + 0]; n++) {
         if (match_mod(log->verbose_prefix, root->msg_levels[n * 2 + 0]))
             log->level = mp_msg_find_level(root->msg_levels[n * 2 + 1]);
@@ -143,8 +144,21 @@ static void update_loglevel(struct mp_log *log)
         log->level = MPMAX(log->level, MSGL_DEBUG);
     if (log->root->stats_file)
         log->level = MPMAX(log->level, MSGL_STATS);
+    log->level = MPMIN(log->level, log->max_level);
     atomic_store(&log->reload_counter, atomic_load(&log->root->reload_counter));
     pthread_mutex_unlock(&root->lock);
+}
+
+// Set (numerically) the maximum level that should still be output for this log
+// instances. E.g. lev=MSGL_WARN => show only warnings and errors.
+void mp_msg_set_max_level(struct mp_log *log, int lev)
+{
+    if (!log->root)
+        return;
+    pthread_mutex_lock(&log->root->lock);
+    log->max_level = MPCLAMP(lev, -1, MSGL_MAX);
+    pthread_mutex_unlock(&log->root->lock);
+    update_loglevel(log);
 }
 
 // Get the current effective msg level.
@@ -216,6 +230,16 @@ void mp_msg_flush_status_line(struct mp_log *log)
     }
 }
 
+void mp_msg_set_term_title(struct mp_log *log, const char *title)
+{
+    if (log->root && title) {
+        // Lock because printf to terminal is not necessarily atomic.
+        pthread_mutex_lock(&log->root->lock);
+        fprintf(stderr, "\e]0;%s\007", title);
+        pthread_mutex_unlock(&log->root->lock);
+    }
+}
+
 bool mp_msg_has_status_line(struct mpv_global *global)
 {
     struct mp_log_root *root = global->log->root;
@@ -282,7 +306,7 @@ static void print_terminal_line(struct mp_log *log, int lev,
         set_msg_color(stream, lev);
 
     if (root->show_time)
-        fprintf(stream, "[%" PRId64 "] ", mp_time_us() - MP_START_TIME);
+        fprintf(stream, "[%10.6f] ", (mp_time_us() - MP_START_TIME) / 1e6);
 
     const char *prefix = log->prefix;
     if ((lev >= MSGL_V) || root->verbose || root->module)
@@ -456,6 +480,7 @@ struct mp_log *mp_log_new(void *talloc_ctx, struct mp_log *parent,
     talloc_set_destructor(log, destroy_log);
     log->root = parent->root;
     log->partial = talloc_strdup(NULL, "");
+    log->max_level = MSGL_MAX;
     if (name) {
         if (name[0] == '!') {
             name = &name[1];

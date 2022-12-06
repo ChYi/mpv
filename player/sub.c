@@ -105,13 +105,19 @@ static bool update_subtitle(struct MPContext *mpctx, double video_pts,
         return false;
 
     // Handle displaying subtitles on terminal; never done for secondary subs
-    if (mpctx->current_track[0][STREAM_SUB] == track && !mpctx->video_out)
-        term_osd_set_subs(mpctx, sub_get_text(dec_sub, video_pts));
+    if (mpctx->current_track[0][STREAM_SUB] == track && !mpctx->video_out) {
+        char *text = sub_get_text(dec_sub, video_pts, SD_TEXT_TYPE_PLAIN);
+        term_osd_set_subs(mpctx, text);
+        talloc_free(text);
+    }
 
     // Handle displaying subtitles on VO with no video being played. This is
     // quite different, because normally subtitles are redrawn on new video
     // frames, using the video frames' timestamps.
-    if (mpctx->video_out && mpctx->video_status == STATUS_EOF) {
+    if (mpctx->video_out && mpctx->video_status == STATUS_EOF &&
+        (mpctx->opts->subs_rend->sub_past_video_end ||
+         !mpctx->current_track[0][STREAM_VIDEO] ||
+         mpctx->current_track[0][STREAM_VIDEO]->attached_picture)) {
         if (osd_get_force_video_pts(mpctx->osd) != video_pts) {
             osd_set_force_video_pts(mpctx->osd, video_pts);
             osd_query_and_reset_want_redraw(mpctx->osd);
@@ -165,7 +171,8 @@ static bool init_subdec(struct MPContext *mpctx, struct track *track)
         return false;
 
     track->d_sub = sub_create(mpctx->global, track->stream,
-                              get_all_attachments(mpctx));
+                              get_all_attachments(mpctx),
+                              get_order(mpctx, track));
     if (!track->d_sub)
         return false;
 
@@ -193,7 +200,7 @@ void reinit_sub(struct MPContext *mpctx, struct track *track)
     sub_select(track->d_sub, true);
     int order = get_order(mpctx, track);
     osd_set_sub(mpctx->osd, order, track->d_sub);
-    sub_control(track->d_sub, SD_CTRL_SET_TOP, &(bool){!!order});
+    sub_control(track->d_sub, SD_CTRL_SET_TOP, &order);
 
     if (mpctx->playback_initialized)
         update_subtitles(mpctx, mpctx->playback_pts);

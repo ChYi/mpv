@@ -21,11 +21,17 @@
 
 #include <libavutil/mem.h>
 #include <libavutil/common.h>
+#include <libavutil/display.h>
 #include <libavutil/bswap.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/intreadwrite.h>
 #include <libavutil/rational.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/mastering_display_metadata.h>
+
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 16, 100)
+# include <libavutil/dovi_meta.h>
+#endif
 
 #include "mpv_talloc.h"
 
@@ -47,6 +53,10 @@ static int mp_image_layout(int imgfmt, int w, int h, int stride_align,
                            int out_plane_size[MP_MAX_PLANES])
 {
     struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(imgfmt);
+
+    w = MP_ALIGN_UP(w, desc.align_x);
+    h = MP_ALIGN_UP(h, desc.align_y);
+
     struct mp_image_params params = {.imgfmt = imgfmt, .w = w, .h = h};
 
     if (!mp_image_params_valid(&params) || desc.flags & MP_IMGFLAG_HWACCEL)
@@ -61,9 +71,6 @@ static int mp_image_layout(int imgfmt, int w, int h, int stride_align,
         int alloc_h = MP_ALIGN_UP(h, 32) >> desc.ys[n];
         int line_bytes = (alloc_w * desc.bpp[n] + 7) / 8;
         out_stride[n] = MP_ALIGN_UP(line_bytes, stride_align);
-        // also align to a multiple of desc.bytes[n]
-        while (desc.bytes[n] && out_stride[n] % desc.bytes[n])
-            out_stride[n] += stride_align;
         out_plane_size[n] = out_stride[n] * alloc_h;
     }
     if (desc.flags & MP_IMGFLAG_PAL)
@@ -201,6 +208,8 @@ static void mp_image_destructor(void *ptr)
     av_buffer_unref(&mpi->hwctx);
     av_buffer_unref(&mpi->icc_profile);
     av_buffer_unref(&mpi->a53_cc);
+    av_buffer_unref(&mpi->dovi);
+    av_buffer_unref(&mpi->film_grain);
     for (int n = 0; n < mpi->num_ff_side_data; n++)
         av_buffer_unref(&mpi->ff_side_data[n].buf);
     talloc_free(mpi->ff_side_data);
@@ -335,6 +344,8 @@ struct mp_image *mp_image_new_ref(struct mp_image *img)
     ref_buffer(&ok, &new->hwctx);
     ref_buffer(&ok, &new->icc_profile);
     ref_buffer(&ok, &new->a53_cc);
+    ref_buffer(&ok, &new->dovi);
+    ref_buffer(&ok, &new->film_grain);
 
     new->ff_side_data = talloc_memdup(NULL, new->ff_side_data,
                         new->num_ff_side_data * sizeof(new->ff_side_data[0]));
@@ -376,6 +387,8 @@ struct mp_image *mp_image_new_dummy_ref(struct mp_image *img)
     new->hwctx = NULL;
     new->icc_profile = NULL;
     new->a53_cc = NULL;
+    new->dovi = NULL;
+    new->film_grain = NULL;
     new->num_ff_side_data = 0;
     new->ff_side_data = NULL;
     return new;
@@ -525,6 +538,8 @@ void mp_image_copy_attributes(struct mp_image *dst, struct mp_image *src)
         }
     }
     assign_bufref(&dst->icc_profile, src->icc_profile);
+    assign_bufref(&dst->dovi, src->dovi);
+    assign_bufref(&dst->film_grain, src->film_grain);
     assign_bufref(&dst->a53_cc, src->a53_cc);
 }
 
@@ -550,8 +565,54 @@ void mp_image_crop_rc(struct mp_image *img, struct mp_rect rc)
     mp_image_crop(img, rc.x0, rc.y0, rc.x1, rc.y1);
 }
 
+// Repeatedly write count patterns of src[0..src_size] to p.
+static void memset_pattern(void *p, size_t count, uint8_t *src, size_t src_size)
+{
+    assert(src_size >= 1);
+
+    if (src_size == 1) {
+        memset(p, src[0], count);
+    } else if (src_size == 2) { // >8 bit YUV => common, be slightly less naive
+        uint16_t val;
+        memcpy(&val, src, 2);
+        uint16_t *p16 = p;
+        while (count--)
+            *p16++ = val;
+    } else {
+        while (count--) {
+            memcpy(p, src, src_size);
+            p = (char *)p + src_size;
+        }
+    }
+}
+
+static bool endian_swap_bytes(void *d, size_t bytes, size_t word_size)
+{
+    if (word_size != 2 && word_size != 4)
+        return false;
+
+    size_t num_words = bytes / word_size;
+    uint8_t *ud = d;
+
+    switch (word_size) {
+    case 2:
+        for (size_t x = 0; x < num_words; x++)
+            AV_WL16(ud + x * 2, AV_RB16(ud + x * 2));
+        break;
+    case 4:
+        for (size_t x = 0; x < num_words; x++)
+            AV_WL32(ud + x * 2, AV_RB32(ud + x * 2));
+        break;
+    default:
+        MP_ASSERT_UNREACHABLE();
+    }
+
+    return true;
+}
+
 // Bottom/right border is allowed not to be aligned, but it might implicitly
 // overwrite pixel data until the alignment (align_x/align_y) is reached.
+// Alpha is cleared to 0 (fully transparent).
 void mp_image_clear(struct mp_image *img, int x0, int y0, int x1, int y1)
 {
     assert(x0 >= 0 && y0 >= 0);
@@ -561,33 +622,85 @@ void mp_image_clear(struct mp_image *img, int x0, int y0, int x1, int y1)
     assert(!(y0 & (img->fmt.align_y - 1)));
 
     struct mp_image area = *img;
+    struct mp_imgfmt_desc *fmt = &area.fmt;
     mp_image_crop(&area, x0, y0, x1, y1);
 
-    uint32_t plane_clear[MP_MAX_PLANES] = {0};
+    // "Black" color for each plane.
+    uint8_t plane_clear[MP_MAX_PLANES][8] = {0};
+    int plane_size[MP_MAX_PLANES] = {0};
+    int misery = 1; // pixel group width
 
-    if (area.imgfmt == IMGFMT_UYVY) {
-        plane_clear[0] = av_le2ne16(0x0080);
-    } else if (area.fmt.flags & MP_IMGFLAG_YUV_NV) {
-        plane_clear[1] = 0x8080;
-    } else if (area.fmt.flags & MP_IMGFLAG_YUV_P) {
-        uint16_t chroma_clear = (1 << area.fmt.plane_bits) / 2;
-        if (!(area.fmt.flags & MP_IMGFLAG_NE))
-            chroma_clear = av_bswap16(chroma_clear);
-        if (area.num_planes > 2)
-            plane_clear[1] = plane_clear[2] = chroma_clear;
+    // YUV integer chroma needs special consideration, and technically luma is
+    // usually not 0 either.
+    if ((fmt->flags & (MP_IMGFLAG_HAS_COMPS | MP_IMGFLAG_PACKED_SS_YUV)) &&
+        (fmt->flags & MP_IMGFLAG_TYPE_MASK) == MP_IMGFLAG_TYPE_UINT &&
+        (fmt->flags & MP_IMGFLAG_COLOR_MASK) == MP_IMGFLAG_COLOR_YUV)
+    {
+        uint64_t plane_clear_i[MP_MAX_PLANES] = {0};
+
+        // Need to handle "multiple" pixels with packed YUV.
+        uint8_t luma_offsets[4] = {0};
+        if (fmt->flags & MP_IMGFLAG_PACKED_SS_YUV) {
+            misery = fmt->align_x;
+            if (misery <= MP_ARRAY_SIZE(luma_offsets)) // ignore if out of bounds
+                mp_imgfmt_get_packed_yuv_locations(fmt->id, luma_offsets);
+        }
+
+        for (int c = 0; c < 4; c++) {
+            struct mp_imgfmt_comp_desc *cd = &fmt->comps[c];
+            int plane_bits = fmt->bpp[cd->plane] * misery;
+            if (plane_bits <= 64 && plane_bits % 8u == 0 && cd->size) {
+                plane_size[cd->plane] = plane_bits / 8u;
+                int depth = cd->size + MPMIN(cd->pad, 0);
+                double m, o;
+                mp_get_csp_uint_mul(area.params.color.space,
+                                    area.params.color.levels,
+                                    depth, c + 1, &m, &o);
+                uint64_t val = MPCLAMP(lrint((0 - o) / m), 0, 1ull << depth);
+                plane_clear_i[cd->plane] |= val << cd->offset;
+                for (int x = 1; x < (c ? 0 : misery); x++)
+                    plane_clear_i[cd->plane] |= val << luma_offsets[x];
+            }
+        }
+
+        for (int p = 0; p < MP_MAX_PLANES; p++) {
+            if (!plane_clear_i[p])
+                plane_size[p] = 0;
+            memcpy(&plane_clear[p][0], &plane_clear_i[p], 8); // endian dependent
+
+            if (fmt->endian_shift) {
+                endian_swap_bytes(&plane_clear[p][0], plane_size[p],
+                                  1 << fmt->endian_shift);
+            }
+        }
     }
 
     for (int p = 0; p < area.num_planes; p++) {
-        int bpp = area.fmt.bpp[p];
-        int bytes = (mp_image_plane_w(&area, p) * bpp + 7) / 8;
-        if (bpp <= 8) {
-            memset_pic(area.planes[p], plane_clear[p], bytes,
-                       mp_image_plane_h(&area, p), area.stride[p]);
-        } else {
-            memset16_pic(area.planes[p], plane_clear[p], (bytes + 1) / 2,
-                         mp_image_plane_h(&area, p), area.stride[p]);
+        int p_h = mp_image_plane_h(&area, p);
+        int p_w = mp_image_plane_w(&area, p);
+        for (int y = 0; y < p_h; y++) {
+            void *ptr = area.planes[p] + (ptrdiff_t)area.stride[p] * y;
+            if (plane_size[p]) {
+                memset_pattern(ptr, p_w / misery, plane_clear[p], plane_size[p]);
+            } else {
+                memset(ptr, 0, mp_image_plane_bytes(&area, p, 0, area.w));
+            }
         }
     }
+}
+
+void mp_image_clear_rc(struct mp_image *mpi, struct mp_rect rc)
+{
+    mp_image_clear(mpi, rc.x0, rc.y0, rc.x1, rc.y1);
+}
+
+// Clear the are of the image _not_ covered by rc.
+void mp_image_clear_rc_inv(struct mp_image *mpi, struct mp_rect rc)
+{
+    struct mp_rect clr[4];
+    int cnt = mp_rect_subtract(&(struct mp_rect){0, 0, mpi->w, mpi->h}, &rc, clr);
+    for (int n = 0; n < cnt; n++)
+        mp_image_clear_rc(mpi, clr[n]);
 }
 
 void mp_image_vflip(struct mp_image *img)
@@ -871,6 +984,13 @@ struct mp_image *mp_image_from_av_frame(struct AVFrame *src)
         dst->params.alpha = p->alpha;
     }
 
+    sd = av_frame_get_side_data(src, AV_FRAME_DATA_DISPLAYMATRIX);
+    if (sd) {
+        double r = av_display_rotation_get((int32_t *)(sd->data));
+        if (!isnan(r))
+            dst->params.rotate = (((int)(-r) % 360) + 360) % 360;
+    }
+
     sd = av_frame_get_side_data(src, AV_FRAME_DATA_ICC_PROFILE);
     if (sd)
         dst->icc_profile = sd->buf;
@@ -893,6 +1013,22 @@ struct mp_image *mp_image_from_av_frame(struct AVFrame *src)
     sd = av_frame_get_side_data(src, AV_FRAME_DATA_A53_CC);
     if (sd)
         dst->a53_cc = sd->buf;
+
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 16, 100)
+    sd = av_frame_get_side_data(src, AV_FRAME_DATA_DOVI_METADATA);
+    if (sd) {
+        // Strip DoVi metadata that requires an EL, since it's near-impossible
+        // for us to support easily or sanely
+        const AVDOVIMetadata *metadata = (AVDOVIMetadata *) sd->buf->data;
+        const AVDOVIRpuDataHeader *rpu = av_dovi_get_header(metadata);
+        if (rpu->disable_residual_flag)
+            dst->dovi = sd->buf;
+    }
+#endif
+
+    sd = av_frame_get_side_data(src, AV_FRAME_DATA_FILM_GRAIN_PARAMS);
+    if (sd)
+        dst->film_grain = sd->buf;
 
     for (int n = 0; n < src->nb_side_data; n++) {
         sd = src->side_data[n];
@@ -1040,4 +1176,41 @@ void memset16_pic(void *dst, int fill, int unitsPerLine, int height, int stride)
             dst = (uint8_t *)dst + stride;
         }
     }
+}
+
+// Pixel at the given luma position on the given plane. x/y always refer to
+// non-subsampled coordinates (even if plane is chroma).
+// The coordinates must be aligned to mp_imgfmt_desc.align_x/y (these are byte
+// and chroma boundaries).
+// You cannot access e.g. individual luma pixels on the luma plane with yuv420p.
+void *mp_image_pixel_ptr(struct mp_image *img, int plane, int x, int y)
+{
+    assert(MP_IS_ALIGNED(x, img->fmt.align_x));
+    assert(MP_IS_ALIGNED(y, img->fmt.align_y));
+    return mp_image_pixel_ptr_ny(img, plane, x, y);
+}
+
+// Like mp_image_pixel_ptr(), but do not require alignment on Y coordinates if
+// the plane does not require it. Use with care.
+// Useful for addressing luma rows.
+void *mp_image_pixel_ptr_ny(struct mp_image *img, int plane, int x, int y)
+{
+    assert(MP_IS_ALIGNED(x, img->fmt.align_x));
+    assert(MP_IS_ALIGNED(y, 1 << img->fmt.ys[plane]));
+    return img->planes[plane] +
+           img->stride[plane] * (ptrdiff_t)(y >> img->fmt.ys[plane]) +
+           (x >> img->fmt.xs[plane]) * (size_t)img->fmt.bpp[plane] / 8;
+}
+
+// Return size of pixels [x0, x0+w-1] in bytes. The coordinates refer to non-
+// subsampled pixels (basically plane 0), and the size is rounded to chroma
+// and byte alignment boundaries for the entire image, even if plane!=0.
+// x0!=0 is useful for rounding (e.g. 8 bpp, x0=7, w=7 => 0..15 => 2 bytes).
+size_t mp_image_plane_bytes(struct mp_image *img, int plane, int x0, int w)
+{
+    int x1 = MP_ALIGN_UP(x0 + w, img->fmt.align_x);
+    x0 = MP_ALIGN_DOWN(x0, img->fmt.align_x);
+    size_t bpp = img->fmt.bpp[plane];
+    int xs = img->fmt.xs[plane];
+    return (x1 >> xs) * bpp / 8 - (x0 >> xs) * bpp / 8;
 }

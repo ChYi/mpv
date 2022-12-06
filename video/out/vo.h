@@ -48,10 +48,11 @@ enum {
     // Special thing for encode mode (vo_driver.initially_blocked).
     // Part of VO_EVENTS_USER to make vo_is_ready_for_frame() work properly.
     VO_EVENT_INITIAL_UNBLOCK            = 1 << 7,
+    VO_EVENT_FOCUS                      = 1 << 8,
 
     // Set of events the player core may be interested in.
     VO_EVENTS_USER = VO_EVENT_RESIZE | VO_EVENT_WIN_STATE | VO_EVENT_DPI |
-                     VO_EVENT_INITIAL_UNBLOCK,
+                     VO_EVENT_INITIAL_UNBLOCK | VO_EVENT_FOCUS,
 };
 
 enum mp_voctrl {
@@ -71,6 +72,9 @@ enum mp_voctrl {
     // you could install your own listener.
     VOCTRL_VO_OPTS_CHANGED,
 
+    // Triggered by any change to the OSD (e.g. OSD style changes)
+    VOCTRL_OSD_CHANGED,
+
     /* private to vo_gpu */
     VOCTRL_LOAD_HWDEC_API,
 
@@ -79,7 +83,7 @@ enum mp_voctrl {
     // be updated and redrawn. Optional; emulated if not available.
     VOCTRL_REDRAW_FRAME,
 
-    // Only used internally in vo_opengl_cb
+    // Only used internally in vo_libmpv
     VOCTRL_PREINIT,
     VOCTRL_UNINIT,
     VOCTRL_RECONFIG,
@@ -91,6 +95,8 @@ enum mp_voctrl {
 
     VOCTRL_SET_CURSOR_VISIBILITY,       // bool*
 
+    VOCTRL_CONTENT_TYPE,                // enum mp_content_type*
+
     VOCTRL_KILL_SCREENSAVER,
     VOCTRL_RESTORE_SCREENSAVER,
 
@@ -98,6 +104,8 @@ enum mp_voctrl {
     // these must access the not-fullscreened window size only).
     VOCTRL_GET_UNFS_WINDOW_SIZE,        // int[2] (w/h)
     VOCTRL_SET_UNFS_WINDOW_SIZE,        // int[2] (w/h)
+
+    VOCTRL_GET_FOCUSED,                 // bool*
 
     // char *** (NULL terminated array compatible with CONF_TYPE_STRING_LIST)
     // names for displays the window is on
@@ -117,11 +125,18 @@ enum mp_voctrl {
     VOCTRL_GET_AMBIENT_LUX,             // int*
     VOCTRL_GET_DISPLAY_FPS,             // double*
     VOCTRL_GET_HIDPI_SCALE,             // double*
+    VOCTRL_GET_DISPLAY_RES,             // int[2]
+    VOCTRL_GET_WINDOW_ID,               // int64_t*
 
-    VOCTRL_GET_PREF_DEINT,              // int*
-
-    /* private to vo_gpu */
+    /* private to vo_gpu and vo_gpu_next */
     VOCTRL_EXTERNAL_RESIZE,
+};
+
+// Helper to expose what kind of content is curently playing to the VO.
+enum mp_content_type {
+    MP_CONTENT_NONE, // used for force-window
+    MP_CONTENT_IMAGE,
+    MP_CONTENT_VIDEO,
 };
 
 #define VO_TRUE         true
@@ -175,6 +190,8 @@ enum {
     VO_CAP_FRAMEDROP    = 1 << 1,
     // VO does not allow frames to be retained (vo_mediacodec_embed).
     VO_CAP_NORETAIN     = 1 << 2,
+    // VO supports applying film grain
+    VO_CAP_FILM_GRAIN   = 1 << 3,
 };
 
 #define VO_MAX_REQ_FRAMES 10

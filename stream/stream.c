@@ -51,6 +51,7 @@ extern const stream_info_t stream_info_ffmpeg;
 extern const stream_info_t stream_info_ffmpeg_unsafe;
 extern const stream_info_t stream_info_avdevice;
 extern const stream_info_t stream_info_file;
+extern const stream_info_t stream_info_slice;
 extern const stream_info_t stream_info_fd;
 extern const stream_info_t stream_info_ifo_dvdnav;
 extern const stream_info_t stream_info_dvdnav;
@@ -88,6 +89,7 @@ static const stream_info_t *const stream_list[] = {
     &stream_info_mf,
     &stream_info_edl,
     &stream_info_file,
+    &stream_info_slice,
     &stream_info_fd,
     &stream_info_cb,
     NULL
@@ -319,14 +321,20 @@ static int stream_create_instance(const stream_info_t *sinfo,
     *ret = NULL;
 
     const char *path = url;
-    for (int n = 0; sinfo->protocols && sinfo->protocols[n]; n++) {
-        path = match_proto(url, sinfo->protocols[n]);
-        if (path)
-            break;
-    }
 
-    if (!path)
-        return STREAM_NO_MATCH;
+    if (flags & STREAM_LOCAL_FS_ONLY) {
+        if (!sinfo->local_fs)
+            return STREAM_NO_MATCH;
+    } else {
+        for (int n = 0; sinfo->protocols && sinfo->protocols[n]; n++) {
+            path = match_proto(url, sinfo->protocols[n]);
+            if (path)
+                break;
+        }
+
+        if (!path)
+            return STREAM_NO_MATCH;
+    }
 
     stream_t *s = talloc_zero(NULL, stream_t);
     s->global = args->global;
@@ -342,6 +350,9 @@ static int stream_create_instance(const stream_info_t *sinfo,
     s->path = talloc_strdup(s, path);
     s->mode = flags & (STREAM_READ | STREAM_WRITE);
     s->requested_buffer_size = opts->buffer_size;
+
+    if (flags & STREAM_LESS_NOISE)
+        mp_msg_set_max_level(s->log, MSGL_WARN);
 
     int opt;
     mp_read_option_raw(s->global, "access-references", &m_option_type_flag, &opt);
@@ -430,8 +441,7 @@ int stream_create_with_args(struct stream_open_args *args, struct stream **ret)
 
         if (r == STREAM_UNSAFE) {
             mp_err(log, "\nRefusing to load potentially unsafe URL from a playlist.\n"
-                   "Use --playlist=file or the --load-unsafe-playlists option to "
-                   "load it anyway.\n\n");
+                   "Use the --load-unsafe-playlists option to load it anyway.\n\n");
         } else if (r == STREAM_NO_MATCH || r == STREAM_UNSUPPORTED) {
             mp_err(log, "No protocol handler found to open URL %s\n", args->url);
             mp_err(log, "The protocol is either unsupported, or was disabled "
@@ -602,11 +612,19 @@ int stream_read(stream_t *s, void *mem, int total)
     return total;
 }
 
+// Read ahead so that at least forward_size bytes are readable ahead. Returns
+// the actual forward amount available (restricted by EOF or buffer limits).
+int stream_peek(stream_t *s, int forward_size)
+{
+    while (stream_read_more(s, forward_size)) {}
+    return s->buf_end - s->buf_cur;
+}
+
 // Like stream_read(), but do not advance the current position. This may resize
 // the buffer to satisfy the read request.
 int stream_read_peek(stream_t *s, void *buf, int buf_size)
 {
-    while (stream_read_more(s, buf_size)) {}
+    stream_peek(s, buf_size);
     return ring_copy(s, buf, buf_size, s->buf_cur);
 }
 
@@ -820,14 +838,13 @@ struct bstr stream_read_file(const char *filename, void *talloc_ctx,
                              struct mpv_global *global, int max_size)
 {
     struct bstr res = {0};
-    char *fname = mp_get_user_path(NULL, global, filename);
-    stream_t *s =
-        stream_create(fname, STREAM_ORIGIN_DIRECT | STREAM_READ, NULL, global);
+    int flags = STREAM_ORIGIN_DIRECT | STREAM_READ | STREAM_LOCAL_FS_ONLY |
+                STREAM_LESS_NOISE;
+    stream_t *s = stream_create(filename, flags, NULL, global);
     if (s) {
         res = stream_read_complete(s, talloc_ctx, max_size);
         free_stream(s);
     }
-    talloc_free(fname);
     return res;
 }
 

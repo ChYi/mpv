@@ -23,6 +23,7 @@
 #include <stdbool.h>
 
 #include <libavcodec/avcodec.h>
+#include <libavformat/version.h>
 #include <libavutil/common.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/opt.h>
@@ -63,8 +64,8 @@ static void uninit_avctx(struct mp_filter *vd);
 static int get_buffer2_direct(AVCodecContext *avctx, AVFrame *pic, int flags);
 static enum AVPixelFormat get_format_hwdec(struct AVCodecContext *avctx,
                                            const enum AVPixelFormat *pix_fmt);
-static int hwdec_validate_opt(struct mp_log *log, const m_option_t *opt,
-                              struct bstr name, struct bstr param);
+static int hwdec_opt_help(struct mp_log *log, const m_option_t *opt,
+                          struct bstr name);
 
 #define HWDEC_DELAY_QUEUE_COUNT 2
 
@@ -72,6 +73,7 @@ static int hwdec_validate_opt(struct mp_log *log, const m_option_t *opt,
 
 struct vd_lavc_params {
     int fast;
+    int film_grain;
     int show_all;
     int skip_loop_filter;
     int skip_idct;
@@ -104,6 +106,8 @@ static const struct m_opt_choice_alternatives discard_names[] = {
 const struct m_sub_options vd_lavc_conf = {
     .opts = (const m_option_t[]){
         {"vd-lavc-fast", OPT_FLAG(fast)},
+        {"vd-lavc-film-grain", OPT_CHOICE(film_grain,
+            {"auto", -1}, {"cpu", 0}, {"gpu", 1})},
         {"vd-lavc-show-all", OPT_FLAG(show_all)},
         {"vd-lavc-skiploopfilter", OPT_DISCARD(skip_loop_filter)},
         {"vd-lavc-skipidct", OPT_DISCARD(skip_idct)},
@@ -117,7 +121,8 @@ const struct m_sub_options vd_lavc_conf = {
             {"no", INT_MAX}, {"yes", 1}), M_RANGE(1, INT_MAX)},
         {"vd-lavc-o", OPT_KEYVALUELIST(avopts)},
         {"vd-lavc-dr", OPT_FLAG(dr)},
-        {"hwdec", OPT_STRING_VALIDATE(hwdec_api, hwdec_validate_opt),
+        {"hwdec", OPT_STRING(hwdec_api),
+            .help = hwdec_opt_help,
             .flags = M_OPT_OPTIONAL_PARAM | UPDATE_HWDEC},
         {"hwdec-codecs", OPT_STRING(hwdec_codecs)},
         {"hwdec-image-format", OPT_IMAGEFORMAT(hwdec_image_format)},
@@ -126,6 +131,7 @@ const struct m_sub_options vd_lavc_conf = {
     },
     .size = sizeof(struct vd_lavc_params),
     .defaults = &(const struct vd_lavc_params){
+        .film_grain = -1 /*auto*/,
         .show_all = 0,
         .check_hw_profile = 1,
         .software_fallback = 3,
@@ -135,7 +141,7 @@ const struct m_sub_options vd_lavc_conf = {
         .framedrop = AVDISCARD_NONREF,
         .dr = 1,
         .hwdec_api = "no",
-        .hwdec_codecs = "h264,vc1,hevc,vp9",
+        .hwdec_codecs = "h264,vc1,hevc,vp8,vp9,av1,prores",
         // Maximum number of surfaces the player wants to buffer. This number
         // might require adjustment depending on whatever the player does;
         // for example, if vo_gpu increases the number of reference surfaces for
@@ -167,6 +173,7 @@ typedef struct lavc_ctx {
     struct mp_codec_params *codec;
     AVCodecContext *avctx;
     AVFrame *pic;
+    AVPacket *avpkt;
     bool use_hwdec;
     struct hwdec_info hwdec; // valid only if use_hwdec==true
     AVRational codec_timebase;
@@ -257,7 +264,7 @@ static int hwdec_compare(const void *p1, const void *p2)
     // List non-copying entries first, so --hwdec=auto takes them.
     if (h1->copying != h2->copying)
         return h1->copying ? 1 : -1;
-    // Order by autoprobe preferrence order.
+    // Order by autoprobe preference order.
     if (h1->auto_pos != h2->auto_pos)
         return h1->auto_pos > h2->auto_pos ? 1 : -1;
     // Fallback sort order to make sorting stable.
@@ -430,8 +437,16 @@ static AVBufferRef *hwdec_create_dev(struct mp_filter *vd,
             return ref;
         }
     } else if (ctx->hwdec_devs) {
-        hwdec_devices_request_all(ctx->hwdec_devs);
-        return hwdec_devices_get_lavc(ctx->hwdec_devs, hwdec->lavc_device);
+        int imgfmt = pixfmt2imgfmt(hwdec->pix_fmt);
+        struct hwdec_imgfmt_request params = {
+            .imgfmt = imgfmt,
+            .probing = autoprobe,
+        };
+        hwdec_devices_request_for_img_fmt(ctx->hwdec_devs, &params);
+
+        const struct mp_hwdec_ctx *hw_ctx =
+            hwdec_devices_get_by_imgfmt(ctx->hwdec_devs, imgfmt);
+        return hw_ctx ? av_buffer_ref(hw_ctx->av_device_ref) : NULL;
     }
 
     return NULL;
@@ -463,6 +478,7 @@ static void select_and_set_hwdec(struct mp_filter *vd)
         MP_VERBOSE(vd, "Not trying to use hardware decoding: codec %s is not "
                    "on whitelist.\n", codec);
     } else {
+        bool hwdec_name_supported = false;  // relevant only if !hwdec_auto
         struct hwdec_info *hwdecs = NULL;
         int num_hwdecs = 0;
         add_all_hwdec_methods(&hwdecs, &num_hwdecs);
@@ -470,12 +486,13 @@ static void select_and_set_hwdec(struct mp_filter *vd)
         for (int n = 0; n < num_hwdecs; n++) {
             struct hwdec_info *hwdec = &hwdecs[n];
 
-            const char *hw_codec = mp_codec_from_av_codec_id(hwdec->codec->id);
-            if (!hw_codec || strcmp(hw_codec, codec) != 0)
-                continue;
-
             if (!hwdec_auto && !(bstr_equals0(opt, hwdec->method_name) ||
                                  bstr_equals0(opt, hwdec->name)))
+                continue;
+            hwdec_name_supported = true;
+
+            const char *hw_codec = mp_codec_from_av_codec_id(hwdec->codec->id);
+            if (!hw_codec || strcmp(hw_codec, codec) != 0)
                 continue;
 
             if (hwdec_auto_safe && !(hwdec->flags & HWDEC_FLAG_WHITELIST))
@@ -508,8 +525,14 @@ static void select_and_set_hwdec(struct mp_filter *vd)
             } else if (!hwdec->copying) {
                 // Most likely METHOD_INTERNAL, which often use delay-loaded
                 // VO support as well.
-                if (ctx->hwdec_devs)
-                    hwdec_devices_request_all(ctx->hwdec_devs);
+                if (ctx->hwdec_devs) {
+                    struct hwdec_imgfmt_request params = {
+                        .imgfmt = pixfmt2imgfmt(hwdec->pix_fmt),
+                        .probing = hwdec_auto,
+                    };
+                    hwdec_devices_request_for_img_fmt(
+                        ctx->hwdec_devs, &params);
+                }
             }
 
             ctx->use_hwdec = true;
@@ -519,8 +542,11 @@ static void select_and_set_hwdec(struct mp_filter *vd)
 
         talloc_free(hwdecs);
 
-        if (!ctx->use_hwdec)
+        if (!ctx->use_hwdec) {
+            if (!hwdec_auto && !hwdec_name_supported)
+                MP_WARN(vd, "Unsupported hwdec: %s\n", ctx->opts->hwdec_api);
             MP_VERBOSE(vd, "No hardware decoding available for this codec.\n");
+        }
     }
 
     if (ctx->use_hwdec) {
@@ -533,33 +559,30 @@ static void select_and_set_hwdec(struct mp_filter *vd)
     }
 }
 
-static int hwdec_validate_opt(struct mp_log *log, const m_option_t *opt,
-                              struct bstr name, struct bstr param)
+static int hwdec_opt_help(struct mp_log *log, const m_option_t *opt,
+                          struct bstr name)
 {
-    if (bstr_equals0(param, "help")) {
-        struct hwdec_info *hwdecs = NULL;
-        int num_hwdecs = 0;
-        add_all_hwdec_methods(&hwdecs, &num_hwdecs);
+    struct hwdec_info *hwdecs = NULL;
+    int num_hwdecs = 0;
+    add_all_hwdec_methods(&hwdecs, &num_hwdecs);
 
-        mp_info(log, "Valid values (with alternative full names):\n");
+    mp_info(log, "Valid values (with alternative full names):\n");
 
-        for (int n = 0; n < num_hwdecs; n++) {
-            struct hwdec_info *hwdec = &hwdecs[n];
+    for (int n = 0; n < num_hwdecs; n++) {
+        struct hwdec_info *hwdec = &hwdecs[n];
 
-            mp_info(log, "  %s (%s)\n", hwdec->method_name, hwdec->name);
-        }
-
-        talloc_free(hwdecs);
-
-        mp_info(log, "  auto (yes '')\n");
-        mp_info(log, "  no\n");
-        mp_info(log, "  auto-safe\n");
-        mp_info(log, "  auto-copy\n");
-        mp_info(log, "  auto-copy-safe\n");
-
-        return M_OPT_EXIT;
+        mp_info(log, "  %s (%s)\n", hwdec->method_name, hwdec->name);
     }
-    return 0;
+
+    talloc_free(hwdecs);
+
+    mp_info(log, "  auto (yes '')\n");
+    mp_info(log, "  no\n");
+    mp_info(log, "  auto-safe\n");
+    mp_info(log, "  auto-copy\n");
+    mp_info(log, "  auto-copy-safe\n");
+
+    return M_OPT_EXIT;
 }
 
 static void force_fallback(struct mp_filter *vd)
@@ -629,6 +652,10 @@ static void init_avctx(struct mp_filter *vd)
     if (!ctx->pic)
         goto error;
 
+    ctx->avpkt = av_packet_alloc();
+    if (!ctx->avpkt)
+        goto error;
+
     if (ctx->use_hwdec) {
         avctx->opaque = vd;
         avctx->thread_count = 1;
@@ -661,7 +688,11 @@ static void init_avctx(struct mp_filter *vd)
     if (!ctx->use_hwdec && ctx->vo && lavc_param->dr) {
         avctx->opaque = vd;
         avctx->get_buffer2 = get_buffer2_direct;
-        avctx->thread_safe_callbacks = 1;
+#if LIBAVCODEC_VERSION_MAJOR < 60
+        AV_NOWARN_DEPRECATED({
+            avctx->thread_safe_callbacks = 1;
+        });
+#endif
     }
 
     avctx->flags |= lavc_param->bitexact ? AV_CODEC_FLAG_BITEXACT : 0;
@@ -676,6 +707,36 @@ static void init_avctx(struct mp_filter *vd)
 
     if (lavc_codec->id == AV_CODEC_ID_H264 && lavc_param->old_x264)
         av_opt_set(avctx, "x264_build", "150", AV_OPT_SEARCH_CHILDREN);
+
+#ifndef AV_CODEC_EXPORT_DATA_FILM_GRAIN
+    if (ctx->opts->film_grain == 1)
+        MP_WARN(vd, "GPU film grain requested, but FFmpeg too old to expose "
+                    "film grain parameters. Please update to latest master, "
+                    "or at least to release 4.4.\n");
+#else
+    switch(ctx->opts->film_grain) {
+    case 0: /*CPU*/
+        // default lavc flags handle film grain within the decoder.
+        break;
+    case 1: /*GPU*/
+        if (!ctx->vo ||
+            (ctx->vo && !(ctx->vo->driver->caps & VO_CAP_FILM_GRAIN))) {
+            MP_MSG(vd, ctx->vo ? MSGL_WARN : MSGL_V,
+                   "GPU film grain requested, but VO %s, expect wrong output.\n",
+                   ctx->vo ?
+                   "does not support applying film grain" :
+                   "is not available at decoder initialization to verify support");
+        }
+
+        avctx->export_side_data |= AV_CODEC_EXPORT_DATA_FILM_GRAIN;
+        break;
+    default:
+        if (ctx->vo && (ctx->vo->driver->caps & VO_CAP_FILM_GRAIN))
+            avctx->export_side_data |= AV_CODEC_EXPORT_DATA_FILM_GRAIN;
+
+        break;
+    }
+#endif
 
     mp_set_avopts(vd->log, avctx, lavc_param->avopts);
 
@@ -696,9 +757,8 @@ static void init_avctx(struct mp_filter *vd)
     // x264 build number (encoded in a SEI element), needed to enable a
     // workaround for broken 4:4:4 streams produced by older x264 versions.
     if (lavc_codec->id == AV_CODEC_ID_H264 && c->first_packet) {
-        AVPacket avpkt;
-        mp_set_av_packet(&avpkt, c->first_packet, &ctx->codec_timebase);
-        avcodec_send_packet(avctx, &avpkt);
+        mp_set_av_packet(ctx->avpkt, c->first_packet, &ctx->codec_timebase);
+        avcodec_send_packet(avctx, ctx->avpkt);
         avcodec_receive_frame(avctx, ctx->pic);
         av_frame_unref(ctx->pic);
         avcodec_flush_buffers(ctx->avctx);
@@ -746,6 +806,7 @@ static void uninit_avctx(struct mp_filter *vd)
 
     flush_all(vd);
     av_frame_free(&ctx->pic);
+    mp_free_av_packet(&ctx->avpkt);
     av_buffer_unref(&ctx->cached_hw_frames_ctx);
 
     avcodec_free_context(&ctx->avctx);
@@ -1011,10 +1072,9 @@ static int send_packet(struct mp_filter *vd, struct demux_packet *pkt)
     if (avctx->skip_frame == AVDISCARD_ALL)
         return 0;
 
-    AVPacket avpkt;
-    mp_set_av_packet(&avpkt, pkt, &ctx->codec_timebase);
+    mp_set_av_packet(ctx->avpkt, pkt, &ctx->codec_timebase);
 
-    int ret = avcodec_send_packet(avctx, pkt ? &avpkt : NULL);
+    int ret = avcodec_send_packet(avctx, pkt ? ctx->avpkt : NULL);
     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
         return ret;
 
@@ -1098,7 +1158,11 @@ static int decode_frame(struct mp_filter *vd)
     mpi->dts = mp_pts_from_av(ctx->pic->pkt_dts, &ctx->codec_timebase);
 
     mpi->pkt_duration =
+#if LIBAVFORMAT_VERSION_INT >= AV_VERSION_INT(59, 30, 100)
+        mp_pts_from_av(ctx->pic->duration, &ctx->codec_timebase);
+#else
         mp_pts_from_av(ctx->pic->pkt_duration, &ctx->codec_timebase);
+#endif
 
     av_frame_unref(ctx->pic);
 

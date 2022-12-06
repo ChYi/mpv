@@ -3,6 +3,7 @@
 
 #include <pthread.h>
 
+#include "osdep/atomic.h"
 #include "osd.h"
 
 enum mp_osdtype {
@@ -49,6 +50,7 @@ struct osd_object {
     // VO cache state
     int vo_change_id;
     struct mp_osd_res vo_res;
+    bool vo_had_output;
 
     // Internally used by osd_libass.c
     bool changed;
@@ -69,7 +71,7 @@ struct osd_state {
     struct osd_object *objs[MAX_OSD_PARTS];
 
     bool render_subs_in_filter;
-    double force_video_pts;
+    mp_atomic_double force_video_pts;
 
     bool want_redraw;
     bool want_redraw_notification;

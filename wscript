@@ -117,6 +117,10 @@ build_options = [
         'default': 'enable',
         'func': check_true,
     }, {
+        'name': '--vector',
+        'desc': 'GCC vector instructions',
+        'func': check_statement([], 'float v __attribute__((vector_size(32)))'),
+    }, {
         'name': '--clang-database',
         'desc': 'generate a clang compilation database',
         'func': check_true,
@@ -158,6 +162,12 @@ main_dependencies = [
         'desc': 'Android environment',
         'func': check_statement('android/api-level.h', '(void)__ANDROID__'),  # arbitrary android-specific header
     }, {
+        'name': '--android-media-ndk',
+        'desc': 'Android Media APIs',
+        'deps': 'android',
+        # header only, library is dynamically loaded
+        'func': check_statement('media/NdkImageReader.h', 'int x = AIMAGE_FORMAT_PRIVATE'),
+    }, {
         'name': '--tvos',
         'desc': 'tvOS environment',
         'func': check_statement(
@@ -182,7 +192,7 @@ main_dependencies = [
         'name': '--swift',
         'desc': 'macOS Swift build tools',
         'deps': 'os-darwin',
-        'func': check_swift,
+        'func': compose_checks(check_swift('4.1'), check_macos_sdk('10.10')),
     }, {
         'name': '--uwp',
         'desc': 'Universal Windows Platform',
@@ -224,11 +234,6 @@ main_dependencies = [
         'req': True,
         'fmsg': 'C11 atomics are required; you may need a newer compiler',
     }, {
-        # C11; technically we require C11, but aligned_alloc() is not in MinGW
-        'name': 'aligned_alloc',
-        'desc': 'C11 aligned_alloc()',
-        'func': check_statement('stdlib.h', 'aligned_alloc(1, 1)'),
-    }, {
         'name': 'librt',
         'desc': 'linking with -lrt',
         'deps': 'pthreads',
@@ -246,22 +251,6 @@ iconv support use --disable-iconv.",
         'desc': 'w32/dos paths',
         'deps': 'os-win32 || os-cygwin',
         'func': check_true
-    }, {
-        'name': 'posix-spawn-native',
-        'desc': 'spawnp()/kill() POSIX support',
-        'func': check_statement(['spawn.h', 'signal.h'],
-            'posix_spawnp(0,0,0,0,0,0); kill(0,0)'),
-        'deps': '!mingw && !tvos',
-    }, {
-        'name': 'posix-spawn-android',
-        'desc': 'spawnp()/kill() Android replacement',
-        'func': check_true,
-        'deps': 'android && !posix-spawn-native',
-    },{
-        'name': 'posix-spawn',
-        'desc': 'any spawnp()/kill() support',
-        'deps': 'posix-spawn-native || posix-spawn-android',
-        'func': check_true,
     }, {
         'name': 'glob-posix',
         'desc': 'glob() POSIX support',
@@ -323,11 +312,9 @@ iconv support use --disable-iconv.",
         'func': check_statement('sys/vfs.h',
                                 'struct statfs fs; fstatfs(0, &fs); fs.f_namelen')
     }, {
-        'name': 'memfd_create',
-        'desc': "Linux's memfd_create()",
-        'deps': 'os-linux',
-        'func': check_statement('sys/mman.h',
-                                'memfd_create("mpv", MFD_CLOEXEC | MFD_ALLOW_SEALING)')
+        'name': 'linux-input-event-codes',
+        'desc': "Linux's input-event-codes.h",
+        'func': check_cc(header_name=['linux/input-event-codes.h']),
     }, {
         'name' : '--lua',
         'desc' : 'Lua',
@@ -339,15 +326,15 @@ iconv support use --disable-iconv.",
     }, {
         'name': 'libass',
         'desc': 'SSA/ASS support',
-        'func': check_pkg_config('libass', '>= 0.12.1'),
+        'func': check_pkg_config('libass', '>= 0.12.2'),
         'req': True,
         'fmsg': "Unable to find development files for libass, or the version " +
                 "found is too old. Aborting."
     }, {
         'name': '--zlib',
         'desc': 'zlib',
-        'func': check_libs(['z'],
-                    check_statement('zlib.h', 'inflate(0, Z_NO_FLUSH)')),
+        'func': any_check(check_pkg_config('zlib'),
+                          check_libs(['z'], check_statement('zlib.h', 'inflate(0, Z_NO_FLUSH)'))),
         'req': True,
         'fmsg': 'Unable to find development files for zlib.'
     }, {
@@ -379,7 +366,6 @@ iconv support use --disable-iconv.",
         'func': check_pkg_config('rubberband', '>= 1.8.0'),
     }, {
         'name': '--zimg',
-        'deps': 'aligned_alloc',
         'desc': 'libzimg support (high quality software scaler)',
         'func': check_pkg_config('zimg', '>= 2.9'),
     }, {
@@ -411,6 +397,14 @@ iconv support use --disable-iconv.",
         'desc': 'SDL2 gamepad input',
         'deps': 'sdl2',
         'func': check_true,
+    }, {
+        'name': 'jpegxl',
+        'desc': 'JPEG XL support via libavcodec',
+        'func': check_pkg_config('libavcodec >= 59.27.100'),
+    }, {
+        'name': 'rubberband-3',
+        'desc': 'new engine support for librubberband',
+        'func': check_pkg_config('rubberband >= 3.0.0'),
     }
 ]
 
@@ -418,24 +412,23 @@ libav_dependencies = [
     {
         'name': 'ffmpeg',
         'desc': 'FFmpeg library',
-        'func': check_pkg_config('libavutil',     '>= 56.12.100',
-                                 'libavcodec',    '>= 58.16.100',
-                                 'libavformat',   '>= 58.9.100',
-                                 'libswscale',    '>= 5.0.101',
-                                 'libavfilter',   '>= 7.14.100',
-                                 'libswresample', '>= 3.0.100'),
+        'func': check_pkg_config('libavutil',     '>= 56.70.100',
+                                 'libavcodec',    '>= 58.134.100',
+                                 'libavformat',   '>= 58.76.100',
+                                 'libswscale',    '>= 5.9.100',
+                                 'libavfilter',   '>= 7.110.100',
+                                 'libswresample', '>= 3.9.100'),
         'req': True,
         'fmsg': "Unable to find development files for some of the required \
 FFmpeg libraries. Git master is recommended."
     }, {
+        'name': 'av-channel-layout',
+        'desc': 'FFmpeg AVChannelLayout API',
+        'func': check_pkg_config('libavutil', '>= 57.24.100'),
+    }, {
         'name': '--libavdevice',
         'desc': 'libavdevice',
-        'func': check_pkg_config('libavdevice', '>= 57.0.0'),
-    }, {
-        'name': '--ffmpeg-strict-abi',
-        'desc': 'Disable all known FFmpeg ABI violations',
-        'func': check_true,
-        'default': 'disable',
+        'func': check_pkg_config('libavdevice', '>= 58.13.100'),
     }
 ]
 
@@ -445,6 +438,20 @@ audio_output_features = [
         'desc': 'SDL2 audio output',
         'deps': 'sdl2',
         'func': check_true,
+    }, {
+        'name': '--oss-audio',
+        'desc': 'OSSv4 audio output',
+        'func': check_statement(['sys/soundcard.h'], 'int x = SNDCTL_DSP_SETPLAYVOL'),
+        'deps': 'posix && gpl',
+    }, {
+        'name': '--pipewire',
+        'desc': 'PipeWire audio output',
+        'func': check_pkg_config('libpipewire-0.3', '>= 0.3.19')
+    }, {
+        'name': '--sndio',
+        'desc': 'sndio audio input/output',
+        'func': check_pkg_config('sndio'),
+        'default': 'disable'
     }, {
         'name': '--pulse',
         'desc': 'PulseAudio audio output',
@@ -502,27 +509,43 @@ video_output_features = [
         'name': '--drm',
         'desc': 'DRM',
         'deps': 'vt.h || consio.h',
-        'func': check_pkg_config('libdrm', '>= 2.4.74'),
+        'func': check_pkg_config('libdrm', '>= 2.4.75'),
     }, {
         'name': '--gbm',
         'desc': 'GBM',
         'deps': 'gbm.h',
-        'func': check_pkg_config('gbm'),
+        'func': check_pkg_config('gbm', '>= 17.1.0'),
     } , {
-        'name': '--wayland-scanner',
+        'name': 'wayland-scanner',
         'desc': 'wayland-scanner',
         'func': check_program('wayland-scanner', 'WAYSCAN')
     } , {
-        'name': '--wayland-protocols',
+        'name': 'wayland-protocols',
         'desc': 'wayland-protocols',
         'func': check_wl_protocols
     } , {
         'name': '--wayland',
         'desc': 'Wayland',
-        'deps': 'wayland-protocols && wayland-scanner',
+        'deps': 'wayland-protocols && wayland-scanner && linux-input-event-codes',
         'func': check_pkg_config('wayland-client', '>= 1.15.0',
                                  'wayland-cursor', '>= 1.15.0',
                                  'xkbcommon',      '>= 0.3.0'),
+    } , {
+        'name': 'wayland-protocols-1-24',
+        'desc': 'wayland-protocols version 1.24+',
+        'deps': 'wayland',
+        'func': check_pkg_config('wayland-protocols >= 1.24'),
+    } , {
+        'name': 'wayland-protocols-1-27',
+        'desc': 'wayland-protocols version 1.27+',
+        'deps': 'wayland',
+        'func': check_pkg_config('wayland-protocols >= 1.27'),
+    } , {
+        'name': 'memfd_create',
+        'desc': "Linux's memfd_create()",
+        'deps': 'wayland',
+        'func': check_statement('sys/mman.h',
+                                'memfd_create("mpv", MFD_CLOEXEC | MFD_ALLOW_SEALING)')
     } , {
         'name': '--x11',
         'desc': 'X11',
@@ -531,6 +554,7 @@ video_output_features = [
                                  'xscrnsaver',  '>= 1.0.0',
                                  'xext',        '>= 1.0.0',
                                  'xinerama',    '>= 1.0.0',
+                                 'xpresent',    '>= 1.0.0',
                                  'xrandr',      '>= 1.2.0'),
     } , {
         'name': '--xv',
@@ -548,20 +572,26 @@ video_output_features = [
                                 cflags=['-DGL_SILENCE_DEPRECATION'])
     } , {
         'name': '--gl-x11',
-        'desc': 'OpenGL X11 Backend',
+        'desc': 'OpenGL X11/GLX (deprecated/legacy)',
         'deps': 'x11',
         'groups': [ 'gl' ],
         'func': check_libs(['GL', 'GL Xdamage'],
                    check_cc(fragment=load_fragment('gl_x11.c'),
-                            use=['x11', 'libdl', 'pthreads']))
+                            use=['x11', 'libdl', 'pthreads'])),
+        'default': 'disable',
+    }, {
+        'name': '--rpi',
+        'desc': 'Raspberry Pi support',
+        'func': check_egl_provider(name='brcmegl', check=any_check(
+            check_pkg_config('brcmegl'),
+            check_pkg_config('/opt/vc/lib/pkgconfig/brcmegl.pc')
+            )),
+        'default': 'disable',
     } , {
         'name': '--egl',
         'desc': 'EGL 1.4',
         'groups': [ 'gl' ],
-        'func': compose_checks(
-            check_pkg_config('egl'),
-            check_statement(['EGL/egl.h'], 'int x[EGL_VERSION_1_4]')
-            ),
+        'func': check_egl_provider('1.4')
     } , {
         'name': '--egl-x11',
         'desc': 'OpenGL X11 EGL Backend',
@@ -645,6 +675,11 @@ video_output_features = [
         'deps': 'vaapi && gl-wayland',
         'func': check_pkg_config('libva-wayland', '>= 1.1.0'),
     }, {
+        'name': 'dmabuf-wayland',
+        'desc': 'Wayland dmabuf support',
+        'deps': 'wayland && memfd_create && (vaapi-wayland || drm)',
+        'func': check_true,
+    }, {
         'name': '--vaapi-drm',
         'desc': 'VAAPI (DRM/EGL support)',
         'deps': 'vaapi && egl-drm',
@@ -679,14 +714,14 @@ video_output_features = [
         'desc': 'libshaderc SPIR-V compiler (shared library)',
         'deps': '!static-build',
         'groups': ['shaderc'],
-        'func': check_cc(header_name='shaderc/shaderc.h', lib='shaderc_shared'),
+        'func': check_pkg_config('shaderc'),
     }, {
         'name': 'shaderc-static',
         'desc': 'libshaderc SPIR-V compiler (static library)',
         'deps': '!shaderc-shared',
         'groups': ['shaderc'],
-        'func': check_cc(header_name='shaderc/shaderc.h',
-                         lib=['shaderc_combined', 'stdc++']),
+        'func': any_check(check_pkg_config('shaderc_combined'),
+                          check_pkg_config('shaderc_static')),
     }, {
         'name': '--shaderc',
         'desc': 'libshaderc SPIR-V compiler',
@@ -714,11 +749,6 @@ video_output_features = [
         'desc': 'Direct3D 11 video output',
         'deps': 'win32-desktop && shaderc && spirv-cross',
         'func': check_cc(header_name=['d3d11_1.h', 'dxgi1_6.h']),
-    }, {
-        'name': '--rpi',
-        'desc': 'Raspberry Pi support',
-        'func': check_pkg_config('brcmegl'),
-        'default': 'disable',
     } , {
         'name': '--ios-gl',
         'desc': 'iOS OpenGL ES hardware decoding interop support',
@@ -742,22 +772,48 @@ video_output_features = [
     }, {
         'name': '--libplacebo',
         'desc': 'libplacebo support',
-        'func': check_pkg_config('libplacebo >= 1.18.0'),
+        'func': check_pkg_config('libplacebo >= 4.157.0'),
+    }, {
+        'name': 'libplacebo-next',
+        'desc': 'libplacebo v4.202+, needed for vo_gpu_next',
+        'deps': 'libplacebo',
+        'func': check_preprocessor('libplacebo/config.h', 'PL_API_VER >= 202',
+                                   use='libplacebo'),
     }, {
         'name': '--vulkan',
         'desc':  'Vulkan context support',
         'deps': 'libplacebo',
         'func': check_pkg_config('vulkan'),
     }, {
-        'name': 'vaapi-vulkan',
-        'desc': 'VAAPI Vulkan',
-        'deps': 'vaapi && vulkan',
+        'name': 'vaapi-libplacebo',
+        'desc': 'VAAPI libplacebo',
+        'deps': 'vaapi && libplacebo',
         'func': check_true,
     }, {
         'name': 'egl-helpers',
         'desc': 'EGL helper functions',
         'deps': 'egl || rpi || egl-angle-win32 || egl-android',
         'func': check_true
+    }, {
+        'name': '--sixel',
+        'desc': 'Sixel',
+        'func': check_pkg_config('libsixel', '>= 1.5'),
+    }, {
+        'name': 'dmabuf-interop-gl',
+        'desc': 'dmabuf GL Interop',
+        'deps': 'egl && drm',
+        'func': check_true,
+    }, {
+        'name': 'dmabuf-interop-pl',
+        'desc': 'dmabuf libplacebo interop',
+        'deps': 'vaapi-libplacebo',
+        'func': check_true,
+    }, {
+        # This can be removed roughly when Debian 12 is released.
+        'name': 'drm-is-kms',
+        'desc': 'drmIsKMS() function',
+        'deps': 'drm',
+        'func': check_pkg_config('libdrm', '>= 2.4.105'),
     }
 ]
 
@@ -806,7 +862,8 @@ hwaccel_features = [
         'name': '--rpi-mmal',
         'desc': 'Raspberry Pi MMAL hwaccel',
         'deps': 'rpi',
-        'func': check_pkg_config('mmal'),
+        'func': any_check(check_pkg_config('mmal'),
+                          check_pkg_config('/opt/vc/lib/pkgconfig/mmal.pc')),
     }
 ]
 
@@ -910,7 +967,7 @@ def options(opt):
     group.add_option('--lua',
         type    = 'string',
         dest    = 'LUA_VER',
-        help    = "select Lua package which should be autodetected. Choices: 51 51deb 51obsd 51fbsd 52 52deb 52arch 52fbsd luajit")
+        help    = "select Lua package to autodetect. Choices (x is 1 or 2): luadef5x, lua5x, lua5.x, lua-5.x, luajit (luadef5x is for pkg-config name 'lua', the rest are exact pkg-config names)")
     group.add_option('--swift-flags',
         type    = 'string',
         dest    = 'SWIFT_FLAGS',
@@ -970,15 +1027,15 @@ def configure(ctx):
         while re.match('\$\{([^}]+)\}', ctx.env[varname]):
             ctx.env[varname] = Utils.subst_vars(ctx.env[varname], ctx.env)
 
+    if ctx.options.LUA_VER:
+        ctx.options.enable_lua = True
+
     ctx.parse_dependencies(build_options)
     ctx.parse_dependencies(main_dependencies)
     ctx.parse_dependencies(libav_dependencies)
     ctx.parse_dependencies(audio_output_features)
     ctx.parse_dependencies(video_output_features)
     ctx.parse_dependencies(hwaccel_features)
-
-    if ctx.options.LUA_VER:
-        ctx.options.enable_lua = True
 
     if ctx.options.SWIFT_FLAGS:
         ctx.env.SWIFT_FLAGS.extend(split(ctx.options.SWIFT_FLAGS))
@@ -1009,7 +1066,7 @@ def __write_version__(ctx):
 
     ctx(
         source = 'version.sh',
-        target = 'version.h',
+        target = 'generated/version.h',
         rule   = 'sh ${SRC} ${CWD_ST:VERSIONSH_CWD} ${VERSIONH_ST:TGT}',
         always = True,
         update_outputs = True)

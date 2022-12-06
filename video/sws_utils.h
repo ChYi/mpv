@@ -44,6 +44,10 @@ struct mp_sws_context {
     // This is unfortunately a hack: bypass command line choice
     enum mp_sws_scaler force_scaler;
 
+    // If zimg is used. Need to manually invalidate cache (set force_reload).
+    // Conflicts with enabling command line opts.
+    struct zimg_opts *zimg_opts;
+
     // Changing these requires setting force_reload=true.
     // By default, they are NULL.
     // Freeing the mp_sws_context will deallocate these if set.
@@ -59,6 +63,7 @@ struct mp_sws_context {
     struct mp_sws_context *cached; // contains parameters for which sws is valid
     struct mp_zimg_context *zimg;
     bool zimg_ok;
+    struct mp_image *aligned_src, *aligned_dst;
 };
 
 struct mp_sws_context *mp_sws_alloc(void *talloc_ctx);

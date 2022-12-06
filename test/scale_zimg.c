@@ -24,6 +24,7 @@ static const struct scale_test_fns fns = {
 static void run(struct test_ctx *ctx)
 {
     struct mp_zimg_context *zimg = mp_zimg_alloc();
+    zimg->opts.threads = 1;
 
     struct scale_test *stest = talloc_zero(NULL, struct scale_test);
     stest->fns = &fns;
@@ -32,9 +33,6 @@ static void run(struct test_ctx *ctx)
     stest->ctx = ctx;
 
     repack_test_run(stest);
-
-    talloc_free(stest);
-    talloc_free(zimg);
 
     FILE *f = test_open_out(ctx, "zimg_formats.txt");
     init_imgfmts_list();
@@ -51,6 +49,9 @@ static void run(struct test_ctx *ctx)
 
     assert_text_files_equal(stest->ctx, "zimg_formats.txt", "zimg_formats.txt",
                 "This can fail if FFmpeg/libswscale adds or removes pixfmts.");
+
+    talloc_free(stest);
+    talloc_free(zimg);
 }
 
 const struct unittest test_repack_zimg = {

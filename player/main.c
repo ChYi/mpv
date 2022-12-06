@@ -25,6 +25,11 @@
 #include <locale.h>
 
 #include "config.h"
+
+#if HAVE_LIBPLACEBO
+#include <libplacebo/config.h>
+#endif
+
 #include "mpv_talloc.h"
 
 #include "misc/dispatch.h"
@@ -54,7 +59,6 @@
 #include "input/input.h"
 
 #include "audio/out/ao.h"
-#include "demux/demux.h"
 #include "misc/thread_tools.h"
 #include "sub/osd.h"
 #include "test/tests.h"
@@ -66,7 +70,7 @@
 #include "screenshot.h"
 
 static const char def_config[] =
-#include "player/builtin_conf.inc"
+#include "generated/etc/builtin.conf.inc"
 ;
 
 #if HAVE_COCOA
@@ -145,6 +149,9 @@ void mp_print_version(struct mp_log *log, int always)
     int v = always ? MSGL_INFO : MSGL_V;
     mp_msg(log, v, "%s %s\n built on %s\n",
            mpv_version, mpv_copyright, mpv_builddate);
+#if HAVE_LIBPLACEBO
+    mp_msg(log, v, "libplacebo version: %s\n", PL_VERSION);
+#endif
     check_library_versions(log, v);
     mp_msg(log, v, "\n");
     // Only in verbose mode.
@@ -202,17 +209,10 @@ static bool handle_help_options(struct MPContext *mpctx)
 {
     struct MPOpts *opts = mpctx->opts;
     struct mp_log *log = mpctx->log;
-    if ((opts->demuxer_name && strcmp(opts->demuxer_name, "help") == 0) ||
-        (opts->audio_demuxer_name && strcmp(opts->audio_demuxer_name, "help") == 0) ||
-        (opts->sub_demuxer_name && strcmp(opts->sub_demuxer_name, "help") == 0)) {
-        demuxer_help(log);
-        MP_INFO(mpctx, "\n");
-        return true;
-    }
     if (opts->ao_opts->audio_device &&
         strcmp(opts->ao_opts->audio_device, "help") == 0)
     {
-        ao_print_devices(mpctx->global, log);
+        ao_print_devices(mpctx->global, log, mpctx->ao);
         return true;
     }
     if (opts->property_print_help) {
@@ -361,7 +361,10 @@ int mp_initialize(struct MPContext *mpctx, char **options)
         m_config_set_profile(mpctx->mconfig, "pseudo-gui", 0);
     }
 
-    mp_get_resume_defaults(mpctx);
+    // Backup the default settings, which should not be stored in the resume
+    // config files. This explicitly includes values set by config files and
+    // the command line.
+    m_config_backup_watch_later_opts(mpctx->mconfig);
 
     mp_input_load_config(mpctx->input);
 
@@ -383,7 +386,9 @@ int mp_initialize(struct MPContext *mpctx, char **options)
         return run_tests(mpctx) ? 1 : -1;
 #endif
 
-    if (!mpctx->playlist->num_entries && !opts->player_idle_mode) {
+    if (!mpctx->playlist->num_entries && !opts->player_idle_mode &&
+        options)
+    {
         // nothing to play
         mp_print_version(mpctx->log, true);
         MP_INFO(mpctx, "%s", mp_help_text);

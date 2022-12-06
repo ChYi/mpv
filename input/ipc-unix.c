@@ -61,6 +61,7 @@ struct client_arg {
     const char *client_name;
     int client_fd;
     bool close_client_fd;
+    bool quit_on_close;
 
     bool writable;
 };
@@ -162,7 +163,7 @@ static void *client_thread(void *p)
             }
         }
 
-        if (fds[1].revents & (POLLIN | POLLHUP)) {
+        if (fds[1].revents & (POLLIN | POLLHUP | POLLNVAL)) {
             while (1) {
                 char buf[128];
                 bstr append = { buf, 0 };
@@ -210,8 +211,14 @@ done:
     talloc_free(client_msg.start);
     if (arg->close_client_fd)
         close(arg->client_fd);
-    mpv_destroy(arg->client);
+    struct mpv_handle *h = arg->client;
+    bool quit = arg->quit_on_close;
     talloc_free(arg);
+    if (quit) {
+        mpv_terminate_destroy(h);
+    } else {
+        mpv_destroy(h);
+    }
     return NULL;
 }
 
@@ -252,6 +259,7 @@ static void ipc_start_client_json(struct mp_ipc_ctx *ctx, int id, int fd)
             id >= 0 ? talloc_asprintf(client, "ipc-%d", id) : "ipc",
         .client_fd = fd,
         .close_client_fd = id >= 0,
+        .quit_on_close = id < 0,
         .writable = true,
     };
 
@@ -264,6 +272,8 @@ bool mp_ipc_start_anon_client(struct mp_ipc_ctx *ctx, struct mpv_handle *h,
     int pair[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair))
         return false;
+    mp_set_cloexec(pair[0]);
+    mp_set_cloexec(pair[1]);
 
     struct client_arg *client = talloc_ptrtype(NULL, client);
     *client = (struct client_arg){

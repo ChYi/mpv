@@ -116,7 +116,7 @@ can also be present. See `List of events`_ for a list of all supported events.
 Because events can occur at any time, it may be difficult at times to determine
 which response goes with which command. Commands may optionally include a
 ``request_id`` which, if provided in the command request, will be copied
-verbatim into the response. mpv does not intrepret the ``request_id`` in any
+verbatim into the response. mpv does not interpret the ``request_id`` in any
 way; it is solely for the use of the requester. The only requirement is that
 the ``request_id`` field must be an integer (a number without fractional parts
 in the range ``-2^63..2^63-1``). Using other types is deprecated and will
@@ -380,11 +380,6 @@ shebang and have the executable bit set.
 When executed, a socket (the IPC connection) is passed to them through file
 descriptor inheritance. The file descriptor is indicated as the special command
 line argument ``--mpv-ipc-fd=N``, where ``N`` is the numeric file descriptor.
-Currently, this is hardcoded as ``--mpv-ipc-fd=3``, and the intention is that
-it will always be ``3``. (This was a compromise between keeping it as simple as
-possible, and not doing too much implicitly. Also, since there is a chance that
-this will change anyway, you should at least validate that you got the expected
-argument.)
 
 The rest is the same as with a normal ``--input-ipc-server`` IPC connection. mpv
 does not attempt to observe or other interact with the started script process.

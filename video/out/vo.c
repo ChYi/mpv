@@ -52,6 +52,7 @@ extern const struct vo_driver video_out_x11;
 extern const struct vo_driver video_out_vdpau;
 extern const struct vo_driver video_out_xv;
 extern const struct vo_driver video_out_gpu;
+extern const struct vo_driver video_out_gpu_next;
 extern const struct vo_driver video_out_libmpv;
 extern const struct vo_driver video_out_null;
 extern const struct vo_driver video_out_image;
@@ -61,9 +62,11 @@ extern const struct vo_driver video_out_drm;
 extern const struct vo_driver video_out_direct3d;
 extern const struct vo_driver video_out_sdl;
 extern const struct vo_driver video_out_vaapi;
+extern const struct vo_driver video_out_dmabuf_wayland;
 extern const struct vo_driver video_out_wlshm;
 extern const struct vo_driver video_out_rpi;
 extern const struct vo_driver video_out_tct;
+extern const struct vo_driver video_out_sixel;
 
 const struct vo_driver *const video_out_drivers[] =
 {
@@ -72,6 +75,9 @@ const struct vo_driver *const video_out_drivers[] =
     &video_out_mediacodec_embed,
 #endif
     &video_out_gpu,
+#if HAVE_LIBPLACEBO_NEXT
+    &video_out_gpu_next,
+#endif
 #if HAVE_VDPAU
     &video_out_vdpau,
 #endif
@@ -86,6 +92,9 @@ const struct vo_driver *const video_out_drivers[] =
 #endif
 #if HAVE_SDL2_VIDEO
     &video_out_sdl,
+#endif
+#if HAVE_DMABUF_WAYLAND
+    &video_out_dmabuf_wayland,
 #endif
 #if HAVE_VAAPI_X11 && HAVE_GPL
     &video_out_vaapi,
@@ -105,6 +114,9 @@ const struct vo_driver *const video_out_drivers[] =
 #endif
 #if HAVE_RPI_MMAL
     &video_out_rpi,
+#endif
+#if HAVE_SIXEL
+    &video_out_sixel,
 #endif
     &video_out_lavc,
     NULL
@@ -203,7 +215,6 @@ const struct m_obj_list vo_obj_list = {
         {"opengl-cb", "libmpv"},
         {0}
     },
-    .allow_unknown_entries = true,
     .allow_trailer = true,
     .disallow_positional_parameters = true,
     .use_global_options = true,
@@ -671,6 +682,7 @@ void vo_control_async(struct vo *vo, int request, void *data)
         break;
     case VOCTRL_KILL_SCREENSAVER:
     case VOCTRL_RESTORE_SCREENSAVER:
+    case VOCTRL_OSD_CHANGED:
         break;
     default:
         abort(); // requires explicit support
@@ -869,7 +881,7 @@ static bool render_frame(struct vo *vo)
 {
     struct vo_internal *in = vo->in;
     struct vo_frame *frame = NULL;
-    bool got_frame = false;
+    bool more_frames = false;
 
     update_display_fps(vo);
 
@@ -939,9 +951,9 @@ static bool render_frame(struct vo *vo)
         in->hasframe_rendered = true;
         int64_t prev_drop_count = vo->in->drop_count;
         // Can the core queue new video now? Non-display-sync uses a separate
-        // timer instead.
-        bool can_queue =
-            !in->frame_queued && in->current_frame->num_vsyncs < 1 && use_vsync;
+        // timer instead, but possibly benefits from preparing a frame early.
+        bool can_queue = !in->frame_queued &&
+            (in->current_frame->num_vsyncs < 1 || !use_vsync);
         pthread_mutex_unlock(&in->lock);
 
         if (can_queue)
@@ -994,9 +1006,14 @@ static bool render_frame(struct vo *vo)
         in->request_redraw = false;
     }
 
-    pthread_cond_broadcast(&in->wakeup); // for vo_wait_frame()
+    if (in->current_frame && in->current_frame->num_vsyncs &&
+        in->current_frame->display_synced)
+        more_frames = true;
 
-    got_frame = true;
+    if (in->frame_queued && in->frame_queued->display_synced)
+        more_frames = true;
+
+    pthread_cond_broadcast(&in->wakeup); // for vo_wait_frame()
 
 done:
     talloc_free(frame);
@@ -1006,7 +1023,7 @@ done:
     }
     pthread_mutex_unlock(&in->lock);
 
-    return got_frame || (in->frame_queued && in->frame_queued->display_synced);
+    return more_frames;
 }
 
 static void do_redraw(struct vo *vo)
@@ -1081,6 +1098,7 @@ static void *vo_thread(void *ptr)
         mp_dispatch_queue_process(vo->in->dispatch, 0);
         if (in->terminate)
             break;
+        stats_event(in->stats, "iterations");
         vo->driver->control(vo, VOCTRL_CHECK_EVENTS, NULL);
         bool working = render_frame(vo);
         int64_t now = mp_time_us();
@@ -1096,10 +1114,10 @@ static void *vo_thread(void *ptr)
             }
         }
         if (vo->want_redraw && !in->want_redraw) {
-            vo->want_redraw = false;
             in->want_redraw = true;
             wakeup_core(vo);
         }
+        vo->want_redraw = false;
         bool redraw = in->request_redraw;
         bool send_reset = in->send_reset;
         in->send_reset = false;
