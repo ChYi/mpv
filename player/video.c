@@ -63,7 +63,7 @@ static const char av_desync_help_text[] =
 "\n";
 
 static int no_new_frame_count = 0;
-const int NO_NEW_FRAME_UPPER_LIMIT = 6; //wait 6 frames before decide it lost of input
+const int NO_NEW_FRAME_UPPER_LIMIT = 12; //wait 12 frames before decide it lost of input
 
 static bool recreate_video_filters(struct MPContext *mpctx)
 {
