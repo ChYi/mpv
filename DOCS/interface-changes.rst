@@ -27,9 +27,29 @@ Interface changes
 ::
 
  --- mpv 0.36.0 ---
+    - add the `--vo=kitty` video output driver, as well as the options
+      `--vo-kitty-cols`, `--vo-kitty-rows`, `--vo-kitty-width`,
+      `--vo-kitty-height`, `--vo-kitty-left`, `--vo-kitty-top`,
+      `--vo-kitty-config-clear`, `--vo-kitty-alt-screen` and
+      `--vo-kitty-use-shm`
     - add `--force-render`
+    - add `--vo-sixel-config-clear`, `--vo-sixel-alt-screen` and
+      `--vo-sixel-buffered`
     - add `--wayland-content-type`
+    - deprecate `--vo-sixel-exit-clear` and alias it to
+      `--vo-sixel-alt-screen`
     - deprecate `--drm-atomic`
+    - add `--demuxer-hysteresis-secs`
+    - add `--video-sync=display-tempo`
+    - the `start` option is no longer unconditionally written by
+      watch-later. It is still written by default but you may
+      need to explictly add `start` depending on how you have
+      `--watch-later-options` configured.
+    - add `--vd-lavc-dr=auto` and make it the default
+    - add support for the fractional scale protocol in wayland
+    - in wayland, hidpi window scaling now scales the window by the compositor's
+      dpi scale factor by default (can be disabled with --no-hidpi-window-scale
+      if fractional scaling support exists).
  --- mpv 0.35.0 ---
     - add the `--vo=gpu-next` video output driver, as well as the options
       `--allow-delayed-peak-detect`, `--builtin-scalers`,

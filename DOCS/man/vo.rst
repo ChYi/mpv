@@ -383,13 +383,54 @@ Available video output drivers are:
     ``--vo-tct-256=<yes|no>`` (default: no)
         Use 256 colors - for terminals which don't support true color.
 
+``kitty``
+    Graphical output for the terminal, using the kitty graphics protocol.
+    Tested with kitty and Konsole.
+
+    You may need to use ``--profile=sw-fast`` to get decent performance.
+
+    Kitty size and alignment options:
+
+    ``--vo-kitty-cols=<columns>``, ``--vo-kitty-rows=<rows>`` (default: 0)
+        Specify the terminal size in character cells, otherwise (0) read it
+        from the terminal, or fall back to 80x25.
+
+    ``--vo-kitty-width=<width>``, ``--vo-kitty-height=<height>`` (default: 0)
+        Specify the available size in pixels, otherwise (0) read it from the
+        terminal, or fall back to 320x240.
+
+    ``--vo-kitty-left=<col>``, ``--vo-kitty-top=<row>`` (default: 0)
+        Specify the position in character cells where the image starts (1 is
+        the first column or row). If 0 (default) then try to automatically
+        determine it according to the other values and the image aspect ratio
+        and zoom.
+
+    ``--vo-kitty-config-clear=<yes|no>`` (default: yes)
+        Whether or not to clear the terminal whenever the output is
+        reconfigured (e.g. when video size changes).
+
+    ``--vo-kitty-alt-screen=<yes|no>`` (default: yes)
+        Whether or not to use the alternate screen buffer and return the
+        terminal to its previous state on exit. When set to no, the last
+        kitty image stays on screen after quit, with the cursor following it.
+
+    ``--vo-kitty-use-shm=<yes|no>`` (default: no)
+        Use shared memory objects to transfer image data to the terminal.
+        This is much faster than sending the data as escape codes, but is not
+        supported by as many terminals. It also only works on the local machine
+        and not via e.g. SSH connections.
+
+        This option is not implemented on Windows.
+
 ``sixel``
     Graphical output for the terminal, using sixels. Tested with ``mlterm`` and
     ``xterm``.
 
-    Note: the Sixel image output is not synchronized with other terminal output
-    from mpv, which can lead to broken images. The option ``--really-quiet``
-    can help with that, and is recommended.
+    Note: the Sixel image output is not synchronized with other terminal
+    output from mpv, which can lead to broken images.
+    The option ``--really-quiet`` can help with that, and is recommended.
+    On some platforms, using the ``--vo-sixel-buffered`` option may work as
+    well.
 
     You may need to use ``--profile=sw-fast`` to get decent performance.
 
@@ -433,9 +474,24 @@ Available video output drivers are:
         to take into account padding at the report - this only works correctly
         when the overall padding per axis is smaller than the number of cells.
 
-    ``--vo-sixel-exit-clear=<yes|no>`` (default: yes)
-        Whether or not to clear the terminal on quit. When set to no - the last
+    ``--vo-sixel-config-clear=<yes|no>`` (default: yes)
+        Whether or not to clear the terminal whenever the output is
+        reconfigured (e.g. when video size changes).
+
+    ``--vo-sixel-alt-screen=<yes|no>`` (default: yes)
+        Whether or not to use the alternate screen buffer and return the
+        terminal to its previous state on exit. When set to no, the last
         sixel image stays on screen after quit, with the cursor following it.
+
+        ``--vo-sixel-exit-clear`` is a deprecated alias for this option and
+        may be removed in the future.
+
+    ``--vo-sixel-buffered=<yes|no>`` (default: no)
+        Buffers the full output sequence before writing it to the terminal.
+        On POSIX platforms, this can help prevent interruption (including from
+        other applications) and thus broken images, but may come at a
+        performance cost with some terminals and is subject to implementation
+        details.
 
     Sixel image quality options:
 
